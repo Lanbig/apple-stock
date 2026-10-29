@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 import { parseCatalog } from './parse.js';
 
@@ -133,30 +134,37 @@ export class AppleStore {
     await this.browser?.close();
   }
 
-  async fetchFulfillment(partNumbers, location) {
+  async fetchFulfillment(partNumbers, location, { maxAttempts = 3 } = {}) {
     const params = new URLSearchParams({ fae: 'true', pl: 'true', 'mts.0': 'regular', location });
     partNumbers.forEach((pn, i) => params.set(`parts.${i}`, pn));
-    const path = `${this.shopPath}/fulfillment-messages?${params}`;
-
-    // Apple's bot shield issues a proof-of-work challenge from the product page;
-    // requests return 541 until the page script has solved it and set its cookie.
-    const deadline = Date.now() + 75_000;
-    let retries = 0;
-    for (;;) {
+    // A 541 can persist even after the storefront scripts set their cookies.
+    // Give the page time to recover without repeatedly discarding that session.
+    const delays = [5_000, 15_000];
+    for (let attempt = 0; ; attempt++) {
+      // Vary only the cache key, keeping the requested location and models intact.
+      params.set('_', randomUUID());
+      const path = `${this.shopPath}/fulfillment-messages?${params}`;
       const { status, text } = await this.page.evaluate(async (url) => {
-        const r = await fetch(url, { headers: { 'x-aos-ui-fetch-call-1': '1' } });
+        const r = await fetch(url, {
+          cache: 'no-store',
+          headers: { 'x-aos-ui-fetch-call-1': Math.random().toString(36).slice(2, 12) + '-' + Date.now().toString(36) },
+          signal: AbortSignal.timeout(15_000),
+        });
         return { status: r.status, text: await r.text() };
       }, path);
       if (status === 200) return JSON.parse(text);
-      if (Date.now() > deadline) throw new Error(`fulfillment-messages kept returning ${status}`);
-      if (Date.now() > deadline - (2 - retries) * 25_000) {
-        // First retry reloads the page; second starts over with fresh cookies.
-        this.log(`fulfillment-messages returned ${status}; ${retries === 0 ? 'reloading page' : 'starting a fresh session'}`);
-        if (retries === 1) await this.newSession();
-        await this.loadProductPage();
-        retries++;
+      const retryable = status === 541 || status === 429 || status >= 500;
+      if (!retryable || attempt + 1 >= maxAttempts || attempt === delays.length) {
+        const error = new Error(status === 541
+          ? 'Apple blocked the stock request (HTTP 541). Automatic checks will pause for 5 minutes. Open the product page in a regular browser on this network to check whether Apple also blocks it; if using a VPN or proxy, try without it.'
+          : `fulfillment-messages returned HTTP ${status}`);
+        if (status === 541 || status === 429) error.retryAfterMs = 5 * 60_000;
+        throw error;
       }
-      await this.page.waitForTimeout(2_000);
+      this.log(`fulfillment-messages returned ${status}; retrying in ${delays[attempt] / 1000}s`);
+      // Reload once, retaining cookies; starting a fresh context loses progress.
+      if (status === 541 && attempt === 0) await this.loadProductPage();
+      await this.page.waitForTimeout(delays[attempt]);
     }
   }
 }

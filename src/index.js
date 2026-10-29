@@ -44,13 +44,15 @@ async function main() {
     return;
   }
 
-  const intervalMs = Math.max(30, Number(env.INTERVAL_SECONDS || 30)) * 1000;
+  // INTERVAL_SECONDS is the upper bound; wait 75–100% of it after each check.
+  const configuredInterval = Number(env.INTERVAL_SECONDS || 60);
+  const intervalMs = Math.max(60, Number.isFinite(configuredInterval) ? configuredInterval : 60) * 1000;
   let timer;
   const schedule = (delay) => {
     clearTimeout(timer);
     timer = setTimeout(async () => {
       await checker.check();
-      schedule(intervalMs * (0.85 + Math.random() * 0.3));
+      schedule(Math.max(checker.retryAfterMs, intervalMs * (0.75 + Math.random() * 0.25)));
     }, delay);
   };
 

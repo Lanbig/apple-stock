@@ -118,6 +118,8 @@
           <span id="ntfyActions" hidden><a class="link" id="ntfyOpen" target="_blank" rel="noopener">Subscribe</a> &nbsp; <button class="link" type="button" id="ntfyTest">Test</button> &nbsp; <button class="link" type="button" id="ntfyOff">Turn off</button></span>
         </div>
         <input class="field" id="email" type="email" placeholder="Email me when it’s in stock" autocomplete="email">
+        <label><input id="randomizeDistance" type="checkbox"> Randomize distance: 25 or 50 miles each check</label>
+        <label id="alternateColorOption" hidden><input id="alternateColor" type="checkbox"> Check one other color every 10 successful checks</label>
         <button class="go" type="button" id="check">Check now</button>
       </div>
     </div>
@@ -177,7 +179,7 @@ function render() {
   renderRows();
   const { checking, lastChecked, error } = state;
   $('status').className = error ? 'err' : '';
-  $('status').textContent = error || (checking ? 'Checking…' : lastChecked ? `Checked ${ago(lastChecked)}` : '');
+  $('status').textContent = error || (checking ? 'Checking…' : lastChecked ? `Checked ${ago(lastChecked)}${state.lastCheckDistanceKm != null ? ` · ${state.settings.country === 'us' ? `${Math.round(state.lastCheckDistanceKm / 1.609344)} mi` : `${Number(state.lastCheckDistanceKm.toFixed(2))} km`} radius` : ''}` : '');
   $('check').disabled = checking;
   $('check').textContent = checking ? 'Checking…' : 'Check now';
 }
@@ -245,6 +247,10 @@ function renderControls() {
     $('country').replaceChildren(...(state.countries ?? []).map((c) => el('option', { value: c.id, textContent: `${countryFlags[c.id] ?? ''} ${c.name}`.trim() })));
     if (!country()) $('country').append(el('option', { value: settings.country, textContent: settings.country.toUpperCase() }));
   }
+  $('alternateColorOption').hidden = settings.product !== 'buy-iphone/iphone-duo';
+  $('alternateColor').checked = settings.alternateColorCheck === true;
+  $('randomizeDistance').checked = settings.randomizeDistance === true;
+  $('distance').disabled = settings.randomizeDistance === true;
   $('country').value = settings.country;
   $('postal').placeholder = country()?.postal ?? 'Postal code';
   const options = distances(settings.country === 'us');
@@ -287,6 +293,8 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') $('picker').classList.remove('open');
 });
+$('randomizeDistance').onchange = () => save({ randomizeDistance: $('randomizeDistance').checked });
+$('alternateColor').onchange = () => save({ alternateColorCheck: $('alternateColor').checked });
 $('postal').onchange = () => save({ postalCode: $('postal').value });
 $('email').onchange = () => save({ emailTo: $('email').value });
 $('ntfyOn').onclick = () => {

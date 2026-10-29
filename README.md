@@ -13,7 +13,7 @@ Every couple of minutes it:
    - **Pickup**: is it available at an Apple Store within `MAX_DISTANCE_KM`?
    - **Courier**: can it be delivered by 2-hour courier?
 
-   Apple blocks scripts that call this API directly (they get error `541`). Calling it from inside the real page gets past that.
+   Requests run inside the real product page so Apple’s storefront scripts and cookies are available. Apple can still block a browser session or network with HTTP `541`. The app makes at most three attempts, preserves the session cookies, and pauses automatic checks for at least five minutes after a persistent block. Each stock request has a 15-second timeout and a unique cache-busting value.
 3. **Compares with last time** (saved in `.state.json`). If something went from unavailable to available, it notifies you. You get one alert per item, and you'll get another if it sells out and comes back.
 
 ```
@@ -51,7 +51,7 @@ You can also skip the UI and set `PRODUCT=buy-vision/apple-vision-pro` in `.env`
 
 ## Run it at home (recommended)
 
-A computer that stays on is the best option. It has a home IP, checks run on time, and the default is one check every 2 minutes.
+A computer that stays on is the best option. It has a home IP, checks run on time, and the default is a random 45–60 second wait after each check.
 
 ```sh
 git clone https://github.com/kelindi/apple-stock && cd apple-stock
@@ -91,9 +91,13 @@ The workflow is scheduled every 5 minutes, but GitHub often starts scheduled run
 | `PRODUCT` | `iphone-duo` | Store page path, e.g. `buy-iphone/iphone-17`, `buy-ipad/ipad-air`, `buy-mac/macbook-air`, `buy-airpods/airpods-pro-3` (a bare slug means `buy-iphone/<slug>`) |
 | `MODELS` | `all` | Comma-separated part numbers or words that must all appear in the model name, e.g. `256GB Night Sky, 512GB` |
 | `MAX_DISTANCE_KM` | `50` | Ignore stores farther than this |
-| `INTERVAL_SECONDS` | `30` | Time between checks for `npm start` (minimum 30, with ±15% jitter) |
+| `INTERVAL_SECONDS` | `60` | Maximum wait after each check for `npm start` (minimum setting 60); randomly waits 75–100% of this value, giving 45–60 seconds by default. Persistent HTTP 541/429 errors pause checks for at least five minutes. |
 | `STATE_FILE` | `.state.json` | Where the last seen availability is stored |
 | `HEADLESS` | `true` | Set to `false` to watch the browser |
+
+The iPhone Duo UI also offers **Check one other color every 10 successful checks** (or set `ALTERNATE_COLOR_CHECK=true`). It sends one extra request for an unselected color with the same configuration, without changing stock results or notifications. The counter resets on restart or selection changes. If no other color matches, it skips the request. This does not guarantee that Apple will stop returning 541.
+
+Enable **Randomize distance: 25 or 50 miles each check** in the UI (or `RANDOMIZE_DISTANCE=true`) to choose either radius with equal probability per check. The footer shows the radius used. Turning it off restores your fixed distance. Distance filters returned stores locally; it does not change the request sent to Apple.
 
 ### Notifiers
 

@@ -4,13 +4,15 @@ import { availabilityKeys, parseCatalog, parseFulfillment, parseProducts, select
 import { configuredNotifiers, notifyAll } from './notify.js';
 import { loadState, saveState } from './state.js';
 
-const SETTING_KEYS = ['country', 'product', 'model', 'filters', 'postalCode', 'maxDistanceKm', 'emailTo', 'ntfyTopic'];
+const SETTING_KEYS = ['country', 'product', 'model', 'filters', 'postalCode', 'maxDistanceKm', 'emailTo', 'ntfyTopic', 'alternateColorCheck', 'randomizeDistance'];
 
 export function defaultSettings(env) {
   return {
     country: normalizeCountry(env.COUNTRY || 'ca'),
     product: normalizeProduct(env.PRODUCT || 'iphone-duo'),
     model: env.MODELS || 'all',
+    alternateColorCheck: env.ALTERNATE_COLOR_CHECK === 'true',
+    randomizeDistance: env.RANDOMIZE_DISTANCE === 'true',
     filters: {},
     postalCode: normalizePostalCode(env.POSTAL_CODE),
     maxDistanceKm: Number(env.MAX_DISTANCE_KM || 50),
@@ -96,6 +98,9 @@ export class Checker {
     this.productImages = {};
     this.models = [];
     this.lastChecked = null;
+    this.lastCheckDistanceKm = null;
+    this.alternateColorChecks = 0;
+    this.retryAfterMs = 0;
     this.error = null;
     this.checking = null;
     this.settingsUpdate = null;
@@ -162,6 +167,8 @@ export class Checker {
     next.ntfyTopic = normalizeTopic(next.ntfyTopic);
     next.product = normalizeProduct(next.product);
     next.filters = normalizeFilters(next.filters);
+    next.alternateColorCheck = next.alternateColorCheck === true;
+    next.randomizeDistance = next.randomizeDistance === true;
     const countryChanged = next.country !== this.settings.country;
     if (countryChanged) {
       // Part numbers, stores and the product menu all differ between countries.
@@ -184,6 +191,7 @@ export class Checker {
       this.models = [];
     }
     const changed = SETTING_KEYS.some((k) => JSON.stringify(next[k]) !== JSON.stringify(this.settings[k]));
+    if (['country', 'product', 'model', 'filters', 'postalCode', 'alternateColorCheck'].some((key) => JSON.stringify(next[key]) !== JSON.stringify(this.settings[key]))) this.alternateColorChecks = 0;
     this.settings = next;
     if (this.settingsFile) await writeFile(this.settingsFile, JSON.stringify(this.settings, null, 2) + '\n');
     if (productChanged && this.store) {
@@ -220,6 +228,7 @@ export class Checker {
       models: this.models,
       checking: Boolean(this.checking),
       lastChecked: this.lastChecked,
+      lastCheckDistanceKm: this.lastCheckDistanceKm,
       error: this.error,
       emailEnabled: Boolean(this.env.RESEND_API_KEY),
       pushEnabled: Boolean(this.push),
@@ -241,18 +250,24 @@ export class Checker {
 
   async runCheck() {
     try {
+      this.retryAfterMs = 0;
       await this.checkOnce();
       this.error = null;
     } catch (err) {
       this.error = err.message;
+      this.retryAfterMs = err.retryAfterMs ?? 0;
       this.log(`check failed: ${err.message}`);
-      await this.store?.close().catch(() => {});
-      this.store.browser = undefined;
+      if (!this.retryAfterMs && this.store) {
+        await this.store.close().catch(() => {});
+        this.store.browser = undefined;
+      }
     }
   }
 
   async checkOnce() {
-    const { product, model, postalCode, maxDistanceKm } = this.settings;
+    const { product, model, postalCode } = this.settings;
+    const randomized = this.settings.randomizeDistance === true;
+    const maxDistanceKm = randomized ? (Math.random() < 0.5 ? 25 : 50) * 1.609344 : this.settings.maxDistanceKm;
     if (!postalCode || !postalCodeFits(postalCode, this.settings.country)) {
       throw new Error(`enter a valid ${(COUNTRIES[this.settings.country]?.postal ?? 'postal code').toLowerCase()}`);
     }
@@ -270,14 +285,18 @@ export class Checker {
     if (selected.length === 0) throw new Error(`no ${productName(product)} model matches`);
 
     const results = { pickup: [], delivery: [] };
+    const observed = { pickup: [], delivery: [] };
     for (const batch of chunk(selected.map((p) => p.partNumber), 10)) {
-      const parsed = parseFulfillment(await store.fetchFulfillment(batch, postalCode), { maxDistanceKm, country: this.settings.country });
-      results.pickup.push(...parsed.pickup);
+      const parsed = parseFulfillment(await store.fetchFulfillment(batch, postalCode), { maxDistanceKm: randomized ? 50 * 1.609344 : maxDistanceKm, country: this.settings.country });
+      observed.pickup.push(...parsed.pickup);
+      observed.delivery.push(...parsed.delivery);
+      results.pickup.push(...parsed.pickup.filter((p) => !Number.isFinite(p.distanceKm) || p.distanceKm <= maxDistanceKm));
       results.delivery.push(...parsed.delivery);
     }
 
     this.models = summarize(selected, results);
     this.lastChecked = new Date().toISOString();
+    this.lastCheckDistanceKm = maxDistanceKm;
 
     const names = new Map(catalog.map((p) => [p.partNumber, p.name]));
     const current = availabilityKeys(results);
@@ -300,7 +319,39 @@ export class Checker {
 
     // If every notifier failed, leave the new keys out of the saved state so they are retried next check.
     const saved = delivered ? [...current.keys()] : [...current.keys()].filter((k) => previous.has(k));
+    if (randomized) {
+      // Keep alert history for stock still available outside today's radius.
+      const observedAvailable = availabilityKeys(observed);
+      for (const key of previous) {
+        if (!current.has(key) && observedAvailable.has(key)) saved.push(key);
+      }
+    }
     if (!this.dryRun) await saveState(this.stateFile, saved);
+    await this.checkAlternateColor(selected);
+  }
+
+  async checkAlternateColor(selected) {
+    if (!this.settings.alternateColorCheck || this.settings.product !== 'buy-iphone/iphone-duo') return;
+    if (++this.alternateColorChecks < 10) return;
+    this.alternateColorChecks = 0;
+    const models = this.variants?.models ?? [];
+    const selectedParts = new Set(selected.map((p) => p.partNumber));
+    const tracked = models.filter((m) => selectedParts.has(m.partNumber));
+    const colors = new Set(tracked.map((m) => m.dims.dimensionColor));
+    const alternate = models.find((m) => m.dims.dimensionColor && !colors.has(m.dims.dimensionColor)
+      && tracked.some((t) => Object.entries(t.dims).every(([key, value]) => key === 'dimensionColor' || m.dims[key] === value)));
+    if (!alternate) {
+      this.log('extra color check skipped: no other color with the selected configuration');
+      return;
+    }
+    try {
+      // This single request never contributes to tracked availability or alerts.
+      await this.store.fetchFulfillment([alternate.partNumber], this.settings.postalCode, { maxAttempts: 1 });
+      this.log(`extra iPhone Duo color check: ${alternate.dims.dimensionColor} (${alternate.partNumber})`);
+    } catch (err) {
+      this.retryAfterMs = err.retryAfterMs ?? 0;
+      this.log(`extra color check failed: ${err.message}`);
+    }
   }
 
   async close() {
